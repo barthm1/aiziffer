@@ -35,19 +35,19 @@ def my_namer(default_name):
     # default_name is the default filename that would be assigned, e.g. Rotate_Test.txt.YYYY-MM-DD
     # Do any manipulations to that name here, for example this changes the name to Rotate_Test.YYYY-MM-DD.txt
     base_filename, ext, date = default_name.split(".")
-    return f"{base_filename}_{date}.{ext}"
+    return f"{base_filename}.{date}.{ext}"
 
 
 config = ConfigParser()
-config.read('gas/config.ini')
+config.read('wasser/config.ini')
 
 LogFile                 = config.getboolean ('Debug', 'Logfile')
 LogfileRetentionInDays  = config.getint     ('Debug', 'LogfileRetentionInDays')
 
 
-# fname =  datetime.now().strftime('%Y-%m-%d')
+datpart =  datetime.now().strftime('%Y-%m-%d')
 # logname = str(fname) + ".log"
-logname = "aiziffer.log"
+logname = "aiziffer." + datpart +".log"
 # print (logname)
 
 logger = logging.getLogger()
@@ -108,6 +108,8 @@ MQTT_SERVER = Uri
 MQTT_PATH   = MainTopic
 
 img_rgb = None
+img_cop = None
+takt = None
 
 anal = []
 ana  = []
@@ -116,6 +118,7 @@ dig  = []
 digi = []
 
 ref_pos = []
+ref_dx_dy = []
 img_ref = []
 
 
@@ -185,17 +188,17 @@ def read_sections():
 
 
 def get_image ():
-    global img_rgb
+    global img_rgb,takt
 
     takt = datetime.now()
     print ("Akttime " , takt.strftime ('%Y-%m-%dT%H:%M:%S'))
     tstamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-    picname =  ClientID + '_' + tstamp + ".jpg"
-    urllib.request.urlretrieve("http://192.168.178.149/capture_with_flashlight", picname)
-
     # picname =  ClientID + '_' + tstamp + ".jpg"
-    # urllib.request.urlretrieve("http://192.168.178.118/capture_with_flashlight", picname)
+    # urllib.request.urlretrieve("http://192.168.178.149/capture_with_flashlight", picname)
+
+    picname =  ClientID + '_' + tstamp + ".jpg"
+    urllib.request.urlretrieve("http://192.168.178.118/capture_with_flashlight", picname)
 
     img_rgb = cv2.imread (picname)
     h , w  = img_rgb.shape[:-1]
@@ -217,6 +220,8 @@ def adjust_image ():
        img_rgb = rotate_image (img_rgb, InitialRotate * -1)
        # cv2.imwrite('after_rotate.jpg' ,img_rgb)
 
+    ref_dx_dy.clear()
+
     for i in range (0, len(ref_pos)):
         href, wref = img_ref[i].shape[:-1]
         res = cv2.matchTemplate (img_rgb, img_ref[i], cv2.TM_CCOEFF_NORMED)
@@ -224,32 +229,40 @@ def adjust_image ():
         print ("min " ,min_val, " max ",max_val, " min_loc ", min_loc, " max_loc " , max_loc)
         print ("wref ", wref, " href", href)
 
+        x, y = ref_pos[i].split()
+        ref_dx_dy.append ((max_loc[0] - int (x) , max_loc[1] - int (y)))
+
         top_left = max_loc
         bottom_right = (top_left[0] + wref, top_left[1] + href)
         # print ("top_left ", top_left, " bottom_right ", bottom_right)
-        cv2.rectangle(img_rgb,top_left, bottom_right, (0,0,255), 1)
+        cv2.rectangle (img_rgb,top_left, bottom_right, (0,0,255), 1)
 
         cv2.imwrite('mark_ref.jpg' ,img_rgb)
 
+    print ("ref dx dy ", ref_dx_dy)
     logging.info("Image adjusted")
 
 
 def analyse_digit():
-    global img_rgb
+    global img_rgb, img_cop
     digi.clear()
+
+    if len(dig) > 0:
+       img_cop = img_rgb.copy()
 
     for i in range (0, len (dig)):
         x, y, w, h = (int(j) for j in dig[i].split())
         # print ("x=",x," y=", y," w=", w, " h=", h)
         # print ("y=", y , " y+h=", y+h, " x=", x, "x+w=", x+w)
-        img_part = img_rgb[y+10:y+h+10, x:x+w]
+
+        img_part = img_rgb[y + ref_dx_dy[0][1]:y + h + ref_dx_dy[0][1], x + ref_dx_dy[0][0]:x +w + ref_dx_dy[0][0]]
         # img_part = img_rgb[y:y+h, x:x+w]
 
-        top_left = (x,y)
-        bottom_right = (x+w, y+h)
-        cv2.rectangle(img_rgb,top_left, bottom_right, (0,0,255), 1)
+        top_left = (x + ref_dx_dy[0][0],y + ref_dx_dy[0][1])
+        bottom_right = (x+w + ref_dx_dy[0][0], y+h + ref_dx_dy[0][1])
+        cv2.rectangle (img_cop,top_left, bottom_right, (255,0,0), 1)
 
-        cv2.imwrite('dig_{}.bmp'.format(i), img_part)
+        cv2.imwrite ('dig_{}.bmp'.format(i), img_part)
         res_img = cv2.resize (img_part, dim_dig, interpolation = cv2.INTER_NEAREST)
         res_img = np.array (res_img, dtype="float32")
         img = np.reshape (res_img,[1,dim_dig[1], dim_dig[0],3])
@@ -257,9 +270,6 @@ def analyse_digit():
         interpreter.set_tensor (input_details[0]['index'], img)
         interpreter.invoke()
         output_data = interpreter.get_tensor (output_details[0]['index'])
-
-        # print(output_data)
-        # print (np.argmax(output_data))
 
         if np.argmax(output_data) == 10:
            digi.append ('N')
@@ -269,12 +279,13 @@ def analyse_digit():
         cv2.imwrite ('res_{}.bmp'.format(i), res_img)
 
     print ("Digits :", digi)
-    cv2.imwrite('mark_dig.jpg' ,img_rgb)
+    cv2.imwrite('mark_dig.jpg' ,img_cop)
+
     logging.info("Digits analysed")
 
 
 def analyse_analog():
-    global img_rgb
+    global img_rgb, img_cop
     ana.clear()
 
     for i in range (0, len (anal)):
@@ -283,12 +294,12 @@ def analyse_analog():
         # print ("x=",x," y=", y," w=", w, " h=", h)
         # print ("y=", y , " y+h=", y+h, " x=", x, "x+w=", x+w)
 
-        # img_part = img_rgb[y+10:y+h+10, x:x+w]
-        img_part = img_rgb[y-15:y-15+h, x+5:x+w+5]
+        # img_part = img_rgb[y:y+h, x:x+w]
+        img_part = img_rgb[y + ref_dx_dy[0][1]:y + h + ref_dx_dy[0][1], x + ref_dx_dy[0][0]:x + w + ref_dx_dy[0][0]]
 
-        top_left = (x+5,y-15)
-        bottom_right = (x+w+5, y+h-15)
-        cv2.rectangle (img_rgb,top_left, bottom_right, (0,0,255), 1)
+        top_left = (x + ref_dx_dy[0][0],y + ref_dx_dy[0][1])
+        bottom_right = (x + w + ref_dx_dy[0][0], y + h + ref_dx_dy[0][1])
+        cv2.rectangle (img_cop,top_left, bottom_right, (0,255,0), 1)
 
         cv2.imwrite ('ana_{}.bmp'.format(i), img_part)
         res_img = cv2.resize (img_part, dim_ana, interpolation = cv2.INTER_NEAREST)
@@ -299,9 +310,7 @@ def analyse_analog():
         interpreter_ana.invoke()
         output_data = interpreter_ana.get_tensor (output_details[0]['index'])
 
-        # print ("Out ", output_data)
-        # print (output_data[0][0], output_data[0][1])
-
+        # print ("out ana ", output_data)
         f1 = output_data[0][0]
         f2 = output_data[0][1]
         fres = round (math.fmod (math.atan2(f1, f2) / (math.pi * 2) + 2, 1) * 10.0, 1)
@@ -310,7 +319,7 @@ def analyse_analog():
         cv2.imwrite ('resa_{}.bmp'.format(i), res_img)
 
     print ("Analog :", ana)
-    cv2.imwrite('mark_ana.jpg' ,img_rgb)
+    cv2.imwrite('mark_ana.jpg' ,img_cop)
     logging.info("Analog analysed")
 
 def send_mqtt():
@@ -321,11 +330,19 @@ def send_mqtt():
             mqtt_auth = { 'username': MQTTuser, 'password': MQTTpassword }
 
          # auth=mqtt_auth
+         publish.single (MQTT_PATH + "/main/timestamp" , takt.strftime ('%Y-%m-%dT%H:%M:%S') , hostname=MQTT_SERVER, client_id=ClientID)
 
          strval_dig =  ''
 
          for i in range (0, len (digi)):
             strval_dig = strval_dig + str(digi[i])
+
+         if DecimalShift < 0:
+            strpos = len (digi) + DecimalShift
+            strval_dig = strval_dig[:strpos] + '.' + strval_dig[strpos:]
+         elif DecimalShift > 0:
+            strval_dig = strval_dig[:DecimalShift] + '.' + strval_dig[DecimalShift:]
+
          publish.single (MQTT_PATH + "/main/digit" , strval_dig , hostname=MQTT_SERVER, client_id=ClientID)
 
 
@@ -336,7 +353,10 @@ def send_mqtt():
 
             publish.single (MQTT_PATH + "/main/analog" , strval_ana , hostname=MQTT_SERVER, client_id=ClientID)
 
-         logging.info("MQTT info sent")
+         if len(ana) > 0:
+            logging.info("MQTT info sent " + strval_dig + " " + strval_ana)
+         else:
+            logging.info("MQTT info sent " + strval_dig)
     except:
        logging.error("MQTT Unexpected error:", sys.exc_info()[0])
        pass
